@@ -2,37 +2,32 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
-import os # Importa o módulo os para ler variáveis de ambiente
+import os
 
 # --- Configurações Iniciais ---
-# O bot agora vai buscar o token de uma variável de ambiente chamada DISCORD_BOT_TOKEN
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 
-# Verificação simples para garantir que o token foi carregado
 if TOKEN is None:
     print("ERRO: O token do bot não foi encontrado nas variáveis de ambiente.")
     print("Certifique-se de que a variável de ambiente 'DISCORD_BOT_TOKEN' está definida.")
-    exit(1) # Sai do programa se o token não for encontrado
+    exit(1)
 
-# Configura o bot para responder a comandos que começam com '!'
 intents = discord.Intents.default()
-intents.message_content = True # Precisamos disso para o bot ler o conteúdo das mensagens
-intents.voice_states = True    # Precisamos disso para o bot gerenciar estados de voz
+intents.message_content = True
+intents.voice_states = True
 
+# Inicializa o bot com o prefixo para comandos de mensagem
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- Fila de Músicas ---
-# Usaremos um dicionário para armazenar a fila de músicas para cada servidor
-# Ex: { id_servidor: [url_musica1, url_musica2, ...], ... }
 queues = {}
 
 # --- Configuração do yt-dlp ---
-# Configurações para baixar apenas o áudio e com a melhor qualidade disponível
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
-    'quiet': True, # Não mostra mensagens de status no console
-    'extract_flat': 'in_playlist' # Para lidar melhor com playlists, se for o caso
+    'quiet': True,
+    'extract_flat': 'in_playlist'
 }
 
 # --- Evento: Quando o Bot Estiver Online ---
@@ -41,42 +36,66 @@ async def on_ready():
     print(f'Bot {bot.user.name} está online!')
     print(f'ID do Bot: {bot.user.id}')
     print(f'Pronto para servir {len(bot.guilds)} servidores!')
+    
+    # --- NOVO: Sincroniza os comandos de barra ---
+    try:
+        synced = await bot.tree.sync() # Sincroniza comandos globais
+        # Ou, para sincronizar em um servidor específico para testes mais rápidos:
+        # synced = await bot.tree.sync(guild=discord.Object(id=ID_DO_SEU_SERVIDOR))
+        print(f"Sincronizados {len(synced)} comandos de barra.")
+    except Exception as e:
+        print(f"Erro ao sincronizar comandos de barra: {e}")
+
 
 # --- Função Auxiliar para Tocar Música ---
-async def play_next_song(ctx):
-    guild_id = ctx.guild.id
+async def play_next_song(ctx_or_interaction):
+    # Detecta se é um Context (comando de prefixo) ou uma Interaction (comando de barra)
+    if isinstance(ctx_or_interaction, commands.Context):
+        guild_id = ctx_or_interaction.guild.id
+        send_func = ctx_or_interaction.send
+        voice_client = ctx_or_interaction.voice_client
+    else: # É uma Interaction
+        guild_id = ctx_or_interaction.guild_id
+        # Para interações, precisamos usar follow_up ou response.send_message
+        # Usaremos uma função simples para enviar mensagens de volta
+        async def interaction_send(msg):
+            try:
+                await ctx_or_interaction.followup.send(msg)
+            except discord.errors.InteractionResponded:
+                # Se a interação ainda não foi respondida, use response.send_message
+                await ctx_or_interaction.response.send_message(msg)
+
+        send_func = interaction_send
+        voice_client = ctx_or_interaction.guild.voice_client # Pega o cliente de voz do guild
+
     if guild_id in queues and queues[guild_id]:
-        # Pega a próxima música da fila
         url = queues[guild_id][0]
         
         try:
-            # Extrai a URL direta do stream de áudio do YouTube
             with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
                 info = ydl.extract_info(url, download=False)
-                audio_url = info['url'] # URL direta do áudio
+                audio_url = info['url']
             
-            # Toca a música no canal de voz
-            # No Linux, 'ffmpeg' já deve estar no PATH se você instalou com apt
-            ctx.voice_client.play(discord.FFmpegPCMAudio(audio_url, executable='ffmpeg'), 
+            voice_client.play(discord.FFmpegPCMAudio(audio_url, executable='ffmpeg'), 
                                    after=lambda e: bot.loop.call_soon_threadsafe(
-                                       asyncio.create_task, play_next_song(ctx)))
+                                       asyncio.create_task, play_next_song(ctx_or_interaction)))
             
-            await ctx.send(f'Tocando agora: **{info.get("title", "Música sem título")}**')
+            await send_func(f'Tocando agora: **{info.get("title", "Música sem título")}**')
         except Exception as e:
-            await ctx.send(f'Deu um erro ao tentar tocar a música: {e}')
-            queues[guild_id].pop(0) # Remove a música com erro da fila
-            await play_next_song(ctx) # Tenta tocar a próxima
+            await send_func(f'Deu um erro ao tentar tocar a música: {e}')
+            queues[guild_id].pop(0)
+            await play_next_song(ctx_or_interaction)
     else:
-        # Se não há mais músicas na fila, o bot sai do canal de voz
-        await ctx.send("Fila vazia. Saindo do canal de voz em breve.")
-        await asyncio.sleep(60) # Espera 1 minuto antes de sair, caso alguém adicione algo
-        if not (guild_id in queues and queues[guild_id]): # Verifica de novo pra ter certeza
-            await ctx.voice_client.disconnect()
-            queues.pop(guild_id, None) # Limpa a fila do servidor
+        await send_func("Fila vazia. Saindo do canal de voz em breve.")
+        await asyncio.sleep(60)
+        if not (guild_id in queues and queues[guild_id]):
+            if voice_client: # Garante que o voice_client existe antes de desconectar
+                await voice_client.disconnect()
+            queues.pop(guild_id, None)
 
-# --- Comando: !play <URL> ---
+# --- Comando de Prefixo: !play <URL> ---
 @bot.command(name='play', help='Toca uma música do YouTube (coloque a URL).')
-async def play(ctx, url: str):
+async def play_prefix(ctx, url: str): # Renomeado para evitar conflito com slash command
     # Verifica se o usuário está em um canal de voz
     if not ctx.author.voice:
         return await ctx.send("Você precisa estar em um canal de voz para usar este comando!")
@@ -88,7 +107,6 @@ async def play(ctx, url: str):
     if not ctx.voice_client:
         await voice_channel.connect()
     elif ctx.voice_client.channel != voice_channel:
-        # Se o bot está em outro canal, move para o canal do usuário
         await ctx.voice_client.move_to(voice_channel)
 
     # Adiciona a música à fila
@@ -102,39 +120,107 @@ async def play(ctx, url: str):
     if not ctx.voice_client.is_playing():
         await play_next_song(ctx)
 
-# --- Comando: !skip ---
+# --- NOVO: Comando de Barra (Slash Command): /play <URL> ---
+@bot.tree.command(name='play', description='Toca uma música do YouTube.')
+@discord.app_commands.describe(url='URL da música do YouTube.')
+async def play_slash(interaction: discord.Interaction, url: str):
+    # Responde à interação imediatamente para evitar o "bot is thinking..."
+    await interaction.response.send_message(f"Adicionando {url} à fila...")
+
+    if not interaction.user.voice:
+        return await interaction.followup.send("Você precisa estar em um canal de voz para usar este comando!")
+
+    voice_channel = interaction.user.voice.channel
+    guild_id = interaction.guild_id
+
+    # Conecta ao canal de voz, se ainda não estiver conectado
+    if not interaction.guild.voice_client:
+        await voice_channel.connect()
+    elif interaction.guild.voice_client.channel != voice_channel:
+        await interaction.guild.voice_client.move_to(voice_channel)
+
+    # Adiciona a música à fila
+    if guild_id not in queues:
+        queues[guild_id] = []
+    queues[guild_id].append(url)
+    
+    # Se não houver música tocando, começa a tocar
+    if not interaction.guild.voice_client.is_playing():
+        await play_next_song(interaction) # Passa a interação para a função de tocar
+    else:
+        await interaction.followup.send(f'**{url}** foi adicionada à fila!')
+
+
+# --- Comando de Prefixo: !skip ---
 @bot.command(name='skip', help='Pula a música atual.')
-async def skip(ctx):
+async def skip_prefix(ctx): # Renomeado
     guild_id = ctx.guild.id
     if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.stop() # Isso vai disparar o `after` e chamar `play_next_song`
+        ctx.voice_client.stop()
         await ctx.send("Música pulada!")
     else:
         await ctx.send("Nenhuma música tocando para pular.")
 
-# --- Comando: !stop ---
+# --- NOVO: Comando de Barra: /skip ---
+@bot.tree.command(name='skip', description='Pula a música atual.')
+async def skip_slash(interaction: discord.Interaction):
+    await interaction.response.send_message("Tentando pular a música...")
+    guild_id = interaction.guild_id
+    if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+        interaction.guild.voice_client.stop()
+        await interaction.followup.send("Música pulada!")
+    else:
+        await interaction.followup.send("Nenhuma música tocando para pular.")
+
+
+# --- Comando de Prefixo: !stop ---
 @bot.command(name='stop', help='Para a música e desconecta o bot.')
-async def stop(ctx):
+async def stop_prefix(ctx): # Renomeado
     guild_id = ctx.guild.id
     if ctx.voice_client:
         ctx.voice_client.stop()
         await ctx.voice_client.disconnect()
         if guild_id in queues:
-            del queues[guild_id] # Limpa a fila do servidor
+            del queues[guild_id]
         await ctx.send("Música parada e bot desconectado!")
     else:
         await ctx.send("O bot não está conectado a um canal de voz.")
 
-# --- Comando: !queue ---
+# --- NOVO: Comando de Barra: /stop ---
+@bot.tree.command(name='stop', description='Para a música e desconecta o bot.')
+async def stop_slash(interaction: discord.Interaction):
+    await interaction.response.send_message("Parando a música e desconectando...")
+    guild_id = interaction.guild_id
+    if interaction.guild.voice_client:
+        interaction.guild.voice_client.stop()
+        await interaction.guild.voice_client.disconnect()
+        if guild_id in queues:
+            del queues[guild_id]
+        await interaction.followup.send("Música parada e bot desconectado!")
+    else:
+        await interaction.followup.send("O bot não está conectado a um canal de voz.")
+
+
+# --- Comando de Prefixo: !queue ---
 @bot.command(name='queue', help='Mostra as músicas na fila.')
-async def show_queue(ctx):
+async def show_queue_prefix(ctx): # Renomeado
     guild_id = ctx.guild.id
     if guild_id in queues and queues[guild_id]:
         queue_list = "\n".join([f"{i+1}. {song}" for i, song in enumerate(queues[guild_id])])
         await ctx.send(f"**Fila de Músicas:**\n{queue_list}")
     else:
-        # ESTA É A LINHA QUE FOI CORRIGIDA (Indentação)
         await ctx.send("A fila de músicas está vazia.")
+
+# --- NOVO: Comando de Barra: /queue ---
+@bot.tree.command(name='queue', description='Mostra as músicas na fila.')
+async def show_queue_slash(interaction: discord.Interaction):
+    await interaction.response.defer() # Indica que o bot está "pensando"
+    guild_id = interaction.guild_id
+    if guild_id in queues and queues[guild_id]:
+        queue_list = "\n".join([f"{i+1}. {song}" for i, song in enumerate(queues[guild_id])])
+        await interaction.followup.send(f"**Fila de Músicas:**\n{queue_list}")
+    else:
+        await interaction.followup.send("A fila de músicas está vazia.")
 
 
 # --- Inicia o Bot ---
