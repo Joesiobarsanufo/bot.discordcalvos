@@ -2,11 +2,15 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
+import os
 
 # --- Configurações Iniciais ---
 # Substitua 'SEU_TOKEN_DO_BOT_AQUI' pelo token que você copiou do Discord Developer Portal
-TOKEN = 'MTE1Mjg1MTMxNTU0MjcyMDUzMg.Givjj7._euq6DbXhQu_AO0VN2R6zkKEUGvvDT19Z-gpLk'
-
+TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+if TOKEN is None:
+    print("ERRO: O token do bot não foi encontrado nas variáveis de ambiente.")
+    print("Certifique-se de que a variável de ambiente 'DISCORD_BOT_TOKEN' está definida.")
+    exit(1) 
 # Configura o bot para responder a comandos que começam com '!'
 intents = discord.Intents.default()
 intents.message_content = True
